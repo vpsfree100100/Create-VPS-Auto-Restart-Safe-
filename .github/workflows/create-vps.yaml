@@ -1,4 +1,4 @@
-name: Create VPS (Auto-Restart & Safe)
+name: Create VPS with Direct SSH (Playit Tunnel & Output Password)
 
 on:
   workflow_dispatch:
@@ -8,52 +8,39 @@ on:
 jobs:
   start-vps:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # ⏱️ 6 hours (adjust as needed)
-    env:
-      TMATE_SERVER: nyc1.tmate.io
-
+    timeout-minutes: 360
     steps:
       - name: ⬇️ Checkout
         uses: actions/checkout@v3
 
-      - name: 📁 Prepare dirs
-        run: mkdir -p links .backup
-
-      - name: 💾 Restore backup (optional)
+      - name: ✅ Install OpenSSH & Create User
         run: |
-          name="${{ github.event.client_payload.vps_name || 'manual-vps' }}"
-          if [ "${{ github.event.client_payload.backup }}" == "true" ]; then
-            echo "Restoring backup for $name..."
-            unzip ".backup/$name.zip" -d . || echo "⚠️ No backup found."
-          fi
+          sudo apt update -y
+          sudo apt install -y openssh-server
+          sudo useradd -m vpsuser
+          PASSWORD="$(openssl rand -base64 10)"
+          echo "vpsuser:$PASSWORD" | sudo chpasswd
+          echo "$PASSWORD" > links/ssh_password.txt
+          sudo sed -i 's/Port 22/Port 2222/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh
 
-      - name: 🔐 Start tmate session
-        run: |
-          sudo apt update -y && sudo apt install -y tmate
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-          SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          echo "$SSH" | tee "links/${{ github.event.client_payload.vps_name || 'manual-vps' }}.txt"
-
-      - name: 🚀 Start Playit Tunnel
+      - name: 🚀 Start Playit Tunnel for SSH
         run: |
           wget -q https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux-amd64 -O playit
           chmod +x playit
-          nohup ./playit > playit.log 2>&1 &
-          echo "✅ Playit started."
+          echo '{"tunnels":[{"proto":"tcp","local_port":2222,"remote_port":0}]}' > playit-config.json
+          nohup ./playit --config playit-config.json > playit.log 2>&1 &
+          sleep 20
+          grep -Eo 'ssh:\/\/[^\"]+' playit.log > playit_ssh.txt || echo "Playit SSH link not found"
 
-      - name: 📦 Save backup (user data only)
+      - name: 📤 Output SSH Info & Tunnel
         run: |
-          name="${{ github.event.client_payload.vps_name || 'manual-vps' }}"
-          zip -r ".backup/$name.zip" . \
-            -x "/usr/*" "/bin/*" "/lib/*" "/lib64/*" "/sbin/*" "/etc/*" "/var/*" \
-            ".git/*" ".github/*" ".backup/*" || true
-
-      - name: 📤 Push updated files
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "🔁 Updated SSH + backup for ${{ github.event.client_payload.vps_name || 'manual-vps' }}"
-          file_pattern: 'links/*.txt .backup/*.zip'
+          echo "==== SSH LOGIN INFO ===="
+          echo "Username: vpsuser" > links/ssh_info.txt
+          echo "Password: $(cat links/ssh_password.txt)" >> links/ssh_info.txt
+          echo "Local Port: 2222 (tunnel)" >> links/ssh_info.txt
+          echo "Playit SSH Tunnel: $(cat playit_ssh.txt)" >> links/ssh_info.txt
+          cat links/ssh_info.txt
 
       - name: ⏳ Keep VPS alive (POSIX-safe loop)
         run: |
