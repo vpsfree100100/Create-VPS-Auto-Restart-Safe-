@@ -1,4 +1,4 @@
-name: Create VPS with Direct SSH (Playit Tunnel & Output Password)
+name: Create VPS with Direct SSH, Output SSH Info (Automated Parsing)
 
 on:
   workflow_dispatch:
@@ -12,6 +12,9 @@ jobs:
     steps:
       - name: ⬇️ Checkout
         uses: actions/checkout@v3
+
+      - name: 📁 Prepare dirs
+        run: mkdir -p links .backup
 
       - name: ✅ Install OpenSSH & Create User
         run: |
@@ -30,16 +33,25 @@ jobs:
           chmod +x playit
           echo '{"tunnels":[{"proto":"tcp","local_port":2222,"remote_port":0}]}' > playit-config.json
           nohup ./playit --config playit-config.json > playit.log 2>&1 &
-          sleep 20
-          grep -Eo 'ssh:\/\/[^\"]+' playit.log > playit_ssh.txt || echo "Playit SSH link not found"
+          # Tunggu Playit siap dan link muncul di log
+          sleep 30
+          # Cari link ssh tunnel (format: ssh://user@host:port)
+          grep -Eo 'ssh:\/\/[^\"]+' playit.log | head -n 1 > playit_ssh.txt || echo "Playit SSH link not found" > playit_ssh.txt
 
-      - name: 📤 Output SSH Info & Tunnel
+      - name: 📤 Output SSH Info (Parsing Otomatis)
         run: |
-          echo "==== SSH LOGIN INFO ===="
-          echo "Username: vpsuser" > links/ssh_info.txt
-          echo "Password: $(cat links/ssh_password.txt)" >> links/ssh_info.txt
-          echo "Local Port: 2222 (tunnel)" >> links/ssh_info.txt
-          echo "Playit SSH Tunnel: $(cat playit_ssh.txt)" >> links/ssh_info.txt
+          # Dapatkan link dari playit_ssh.txt
+          TUNNEL=$(cat playit_ssh.txt)
+          # Parsing host dan port
+          HOST=$(echo "$TUNNEL" | awk -F'[@:]' '{print $2}')
+          PORT=$(echo "$TUNNEL" | awk -F'[@:]' '{print $3}')
+          USER="vpsuser"
+          PASS=$(cat links/ssh_password.txt)
+          echo "==== SSH LOGIN INFO ====" > links/ssh_info.txt
+          echo "Username: $USER" >> links/ssh_info.txt
+          echo "Password: $PASS" >> links/ssh_info.txt
+          echo "Host: $HOST" >> links/ssh_info.txt
+          echo "Port: $PORT" >> links/ssh_info.txt
           cat links/ssh_info.txt
 
       - name: ⏳ Keep VPS alive (POSIX-safe loop)
@@ -49,4 +61,4 @@ jobs:
             echo "🟢 Running minute $i/360..."
             command sleep 60 || break
             i=$((i+1))
-          done
+          done 
