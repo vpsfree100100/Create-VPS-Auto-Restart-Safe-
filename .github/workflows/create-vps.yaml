@@ -1,20 +1,32 @@
-name: Create VPS with Direct SSH, Output SSH Info (Advanced Tunnel Link Wait)
+name: Create VPS with Direct SSH (Piggy.io Pro Tunnel)
 
 on:
   workflow_dispatch:
-  repository_dispatch:
-    types: [create-vps]
+
+jobs:
+  start-vps:
+    runs-on: ubuntu-latestname: Create VPS with Direct SSH (Piggy.io Pro Tunnel)
+
+on:
+  workflow_dispatch:
 
 jobs:
   start-vps:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
     steps:
       - name: ⬇️ Checkout
         uses: actions/checkout@v3
 
       - name: 📁 Prepare dirs
         run: mkdir -p links .backup
+
+      - name: 💾 Restore backup (optional)
+        run: |
+          name="${{ github.event.client_payload.vps_name || 'manual-vps' }}"
+          if [ "${{ github.event.client_payload.backup }}" == "true" ]; then
+            echo "Restoring backup for $name..."
+            unzip ".backup/$name.zip" -d . || echo "⚠️ No backup found."
+          fi
 
       - name: ✅ Install OpenSSH & Create User
         run: |
@@ -27,41 +39,35 @@ jobs:
           sudo sed -i 's/Port 22/Port 2222/' /etc/ssh/sshd_config
           sudo systemctl restart ssh
 
-      - name: 🚀 Start Playit Tunnel for SSH
+      - name: 🚀 Start piggy.io Pro Tunnel for SSH
+        env:
+          PIGGY_TOKEN: ${{ secrets.PIGGY_TOKEN }}
         run: |
-          wget -q https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux-amd64 -O playit
-          chmod +x playit
-          echo '{"tunnels":[{"proto":"tcp","local_port":2222,"remote_port":0}]}' > playit-config.json
-          nohup ./playit --config playit-config.json > playit.log 2>&1 &
-
-      - name: 🔎 Loop cek Playit Tunnel Link sampai muncul
-        run: |
-          # Loop max 2 menit (120 detik), cek setiap 5 detik
+          curl -fsSL https://piggy.io/install.sh | bash
+          nohup piggy --token "$PIGGY_TOKEN" tcp 2222 > piggy.log 2>&1 &
+          # Loop cek link tunnel (maks 2 menit)
           for i in {1..24}; do
-            LINK=$(grep -Eo 'ssh:\/\/[^\"]+' playit.log | head -n 1)
+            LINK=$(grep -Eo 'tcp:\/\/[^\s]+' piggy.log | head -n 1)
             if [ -n "$LINK" ]; then
-              echo "$LINK" > playit_ssh.txt
+              echo "$LINK" > piggy_ssh.txt
               echo "Dapat link SSH Tunnel: $LINK"
               break
             fi
-            echo "Belum dapat link tunnel, tunggu 5 detik (percobaan $i/24)..."
             sleep 5
           done
-          # Jika tetap kosong, beri info error
-          if [ ! -s playit_ssh.txt ]; then
-            echo "Playit SSH link not found" > playit_ssh.txt
-            echo "Gagal mendapatkan link tunnel setelah 2 menit."
+          if [ ! -s piggy_ssh.txt ]; then
+            echo "Piggy SSH link not found" > piggy_ssh.txt
           fi
 
-      - name: 📤 Output SSH Info (Parsing Otomatis & Aman)
+      - name: 📤 Output SSH Info (Parsing Otomatis)
         run: |
-          if grep -q 'ssh://' playit_ssh.txt; then
-            TUNNEL=$(cat playit_ssh.txt | head -n 1)
-            HOST=$(echo "$TUNNEL" | awk -F'[@:]' '{print $2}')
-            PORT=$(echo "$TUNNEL" | awk -F'[@:]' '{print $3}')
+          if grep -q 'tcp://' piggy_ssh.txt; then
+            TUNNEL=$(cat piggy_ssh.txt | head -n 1)
+            HOST=$(echo "$TUNNEL" | cut -d'/' -f3 | cut -d':' -f1)
+            PORT=$(echo "$TUNNEL" | cut -d':' -f3)
           else
-            HOST="Playit tunnel belum tersedia"
-            PORT="Playit tunnel belum tersedia"
+            HOST="Piggy tunnel belum tersedia"
+            PORT="Piggy tunnel belum tersedia"
           fi
           USER="vpsuser"
           PASS=$(cat links/ssh_password.txt)
@@ -72,7 +78,20 @@ jobs:
           echo "Port: $PORT" >> links/ssh_info.txt
           cat links/ssh_info.txt
 
-      - name: ⏳ Keep VPS alive (POSIX-safe loop)
+      - name: 📦 Save backup (user data only)
+        run: |
+          name="${{ github.event.client_payload.vps_name || 'manual-vps' }}"
+          zip -r ".backup/$name.zip" . \
+            -x "/usr/*" "/bin/*" "/lib/*" "/lib64/*" "/sbin/*" "/etc/*" "/var/*" \
+            ".git/*" ".github/*" ".backup/*" || true
+
+      - name: 📤 Push updated files
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "🔁 Updated SSH + backup for ${{ github.event.client_payload.vps_name || 'manual-vps' }}"
+          file_pattern: 'links/*.txt .backup/*.zip'
+
+      - name: ⏳ Keep VPS alive
         run: |
           i=1
           while [ $i -le 360 ]; do
@@ -80,4 +99,90 @@ jobs:
             command sleep 60 || break
             i=$((i+1))
           done
+    steps:
+      - name: ⬇️ Checkout
+        uses: actions/checkout@v3
 
+      - name: 📁 Prepare dirs
+        run: mkdir -p linksv
+     
+   - name: 💾 Restore backup (optional)
+        run: |
+          name="${{ github.event.client_payload.vps_name || 'manual-vps' }}"
+          if [ "${{ github.event.client_payload.backup }}" == "true" ]; then
+            echo "Restoring backup for $name..."
+            unzip ".backup/$name.zip" -d . || echo "⚠️ No backup found."
+          fi
+
+      - name: ✅ Install OpenSSH & Create User
+        run: |
+          sudo apt update -y
+          sudo apt install -y openssh-server
+          sudo useradd -m vpsuser
+          PASSWORD="$(openssl rand -base64 10)"
+          echo "vpsuser:$PASSWORD" | sudo chpasswd
+          echo "$PASSWORD" > links/ssh_password.txt
+          sudo sed -i 's/Port 22/Port 2222/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh
+
+      - name: 🚀 Start piggy.io Pro Tunnel for SSH
+        env:
+          PIGGY_TOKEN: ${{ secrets.PIGGY_TOKEN }}
+        run: |
+          curl -fsSL https://piggy.io/install.sh | bash
+          # Jalankan Piggy dengan token Pro di background
+          nohup piggy --token "$PIGGY_TOKEN" tcp 2222 > piggy.log 2>&1 &
+          # Loop cek link tunnel (maks 2 menit)
+          for i in {1..24}; do
+            LINK=$(grep -Eo 'tcp:\/\/[^\s]+' piggy.log | head -n 1)
+            if [ -n "$LINK" ]; then
+              echo "$LINK" > piggy_ssh.txt
+              echo "Dapat link SSH Tunnel: $LINK"
+              break
+            fi
+            sleep 5
+          done
+          if [ ! -s piggy_ssh.txt ]; then
+            echo "Piggy SSH link not found" > piggy_ssh.txt
+          fi
+
+      - name: 📤 Output SSH Info (Parsing Otomatis)
+        run: |
+          if grep -q 'tcp://' piggy_ssh.txt; then
+            TUNNEL=$(cat piggy_ssh.txt | head -n 1)
+            HOST=$(echo "$TUNNEL" | cut -d'/' -f3 | cut -d':' -f1)
+            PORT=$(echo "$TUNNEL" | cut -d':' -f3)
+          else
+            HOST="Piggy tunnel belum tersedia"
+            PORT="Piggy tunnel belum tersedia"
+          fi
+          USER="vpsuser"
+          PASS=$(cat links/ssh_password.txt)
+          echo "==== SSH LOGIN INFO ====" > links/ssh_info.txt
+          echo "Username: $USER" >> links/ssh_info.txt
+          echo "Password: $PASS" >> links/ssh_info.txt
+          echo "Host: $HOST" >> links/ssh_info.txt
+          echo "Port: $PORT" >> links/ssh_info.txt
+          cat links/ssh_info.txt
+       
+       - name: 📦 Save backup (user data only)
+         run: |
+          name="${{ github.event.client_payload.vps_name || 'manual-vps' }}"
+          zip -r ".backup/$name.zip" . \
+            -x "/usr/*" "/bin/*" "/lib/*" "/lib64/*" "/sbin/*" "/etc/*" "/var/*" \
+            ".git/*" ".github/*" ".backup/*" || true
+
+      - name: 📤 Push updated files
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "🔁 Updated SSH + backup for ${{ github.event.client_payload.vps_name || 'manual-vps' }}"
+          file_pattern: 'links/*.txt .backup/*.zip'
+
+      - name: ⏳ Keep VPS alive
+        run: |
+          i=1
+          while [ $i -le 360 ]; do
+            echo "🟢 Running minute $i/360..."
+            command sleep 60 || break
+            i=$((i+1))
+          done
